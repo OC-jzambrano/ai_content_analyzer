@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   api:
     build:
@@ -8,6 +6,36 @@ services:
     container_name: ai-content-analyzer-api
     ports:
       - "8000:8000"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      ASSEMBLYAI_API_KEY: ${ASSEMBLYAI_API_KEY}
+      SIGHTENGINE_API_USER: ${SIGHTENGINE_API_USER}
+      SIGHTENGINE_API_SECRET: ${SIGHTENGINE_API_SECRET}
+      CLAUDE_API_KEY: ${CLAUDE_API_KEY}
     env_file:
       - .env
+    depends_on:
+      - redis
     restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "arq", "src.app.workers.worker.WorkerSettings"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      ASSEMBLYAI_API_KEY: ${ASSEMBLYAI_API_KEY}
+      SIGHTENGINE_API_USER: ${SIGHTENGINE_API_USER}
+      SIGHTENGINE_API_SECRET: ${SIGHTENGINE_API_SECRET}
+      CLAUDE_API_KEY: ${CLAUDE_API_KEY}
+    depends_on: 
+      - redis
+
+volumes:
+  media_storage:
