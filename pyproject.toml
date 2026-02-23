@@ -19,7 +19,8 @@ dependencies = [
     "python-dotenv>=1.0",
     "redis>=5.0.8",
     "arq",
-    "aiohttp"
+    "aiohttp",
+    "prometheus-client>=0.20.0"
 ]
 
 [project.optional-dependencies]

@@ -8,6 +8,7 @@ import aiohttp
 from aiohttp import ClientError
 from app.utils.retry import run_with_retry
 
+from app.utils.scoring import text_status
 
 from src.app.core.config import settings
 from src.app.schemas.summarization import PolicySignal, SummarizationResult
@@ -15,15 +16,6 @@ from src.app.schemas.summarization import PolicySignal, SummarizationResult
 SAFE = "Safe"
 WARNING = "Warning"
 UNSAFE = "Unsafe"
-
-
-def _status_text(score: float) -> str:
-    # Text thresholds per your spec: Safe>=85, Warning 70-84, Unsafe<70
-    if score >= 85:
-        return SAFE
-    if score >= 70:
-        return WARNING
-    return UNSAFE
 
 
 class ClaudeError(RuntimeError):
@@ -188,7 +180,7 @@ class SummarizationService:
             # Apply required status rules:
             status = WARNING
             if score_f is not None:
-                status = _status_text(score_f)
+                status = text_status(cat, score_f)
 
                 # Brand + Disclosure: Warning below 85 (already in _status_text), but ensure recommendation present.
                 if cat in ("Brand Mentions", "Disclosure Compliance") and score_f < 85 and not recommendation:

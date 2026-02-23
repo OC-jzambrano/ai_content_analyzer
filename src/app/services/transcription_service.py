@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import aiohttp
 
 from pathlib import Path
 from typing import Optional
 from aiohttp import ClientError
 from app.utils.retry import run_with_retry, RetryError
+from app.core.metrics import AI_LATENCY, AI_FAILURES
 from src.app.core.config import settings
 from src.app.schemas.transcript import TranscriptionResult, TranscriptSegment
 
@@ -67,6 +69,7 @@ class TranscriptionService:
     - Turn an audio file into a transcript using AssemblyAI.
     - Includes provider polling (still same stage).
     - Returns TranscriptionResult.
+    - Tracks latency and failures via Prometheus metrics.
     """
 
     def __init__(self, client: Optional[AssemblyAIClient] = None) -> None:
@@ -81,27 +84,57 @@ class TranscriptionService:
         last_err: Optional[Exception] = None
         for attempt in range(1, settings.RETRY_ATTEMPTS + 1):
             try:
-                upload_url = await run_with_retry(
-                self._client.upload,
-                str(ap),
-                max_attempts=settings.RETRY_ATTEMPTS,
-                timeout=settings.REQUEST_TIMEOUT,
-                retryable_exceptions=(ClientError, asyncio.TimeoutError),)
-                provider_job_id = await run_with_retry(
-                self._client.create_transcript,
-                upload_url,
-                max_attempts=settings.RETRY_ATTEMPTS,
-                timeout=settings.REQUEST_TIMEOUT,
-                retryable_exceptions=(ClientError, asyncio.TimeoutError),)
+                # ---- UPLOAD STAGE ----
+                start = time.perf_counter()
+                try:
+                    upload_url = await run_with_retry(
+                        self._client.upload,
+                        str(ap),
+                        max_attempts=settings.RETRY_ATTEMPTS,
+                        timeout=settings.REQUEST_TIMEOUT,
+                        retryable_exceptions=(ClientError, asyncio.TimeoutError),
+                    )
+                    duration = time.perf_counter() - start
+                    AI_LATENCY.labels(provider="assemblyai", operation="upload").observe(duration)
+                except Exception as e:
+                    AI_FAILURES.labels(provider="assemblyai", operation="upload").inc()
+                    raise
+
+                # ---- CREATE TRANSCRIPT STAGE ----
+                start = time.perf_counter()
+                try:
+                    provider_job_id = await run_with_retry(
+                        self._client.create_transcript,
+                        upload_url,
+                        max_attempts=settings.RETRY_ATTEMPTS,
+                        timeout=settings.REQUEST_TIMEOUT,
+                        retryable_exceptions=(ClientError, asyncio.TimeoutError),
+                    )
+                    duration = time.perf_counter() - start
+                    AI_LATENCY.labels(provider="assemblyai", operation="create_transcript").observe(duration)
+                except Exception as e:
+                    AI_FAILURES.labels(provider="assemblyai", operation="create_transcript").inc()
+                    raise
 
                 # Poll until completed/failed
-                for _ in range(settings.TRANSCRIPTION_MAX_POLLS):
-                    data = await run_with_retry(
-                    self._client.get_transcript,
-                    provider_job_id,
-                    max_attempts=settings.RETRY_ATTEMPTS,
-                    timeout=settings.REQUEST_TIMEOUT,
-                    retryable_exceptions=(ClientError, asyncio.TimeoutError),)
+                poll_attempt = 0
+                for poll_attempt in range(settings.TRANSCRIPTION_MAX_POLLS):
+                    # ---- GET TRANSCRIPT STAGE (polling) ----
+                    start = time.perf_counter()
+                    try:
+                        data = await run_with_retry(
+                            self._client.get_transcript,
+                            provider_job_id,
+                            max_attempts=settings.RETRY_ATTEMPTS,
+                            timeout=settings.REQUEST_TIMEOUT,
+                            retryable_exceptions=(ClientError, asyncio.TimeoutError),
+                        )
+                        duration = time.perf_counter() - start
+                        AI_LATENCY.labels(provider="assemblyai", operation="get_transcript").observe(duration)
+                    except Exception as e:
+                        AI_FAILURES.labels(provider="assemblyai", operation="get_transcript").inc()
+                        raise
+
                     status = data.get("status")
 
                     if status == "completed":
@@ -131,6 +164,7 @@ class TranscriptionService:
                         )
 
                     if status == "error":
+                        AI_FAILURES.labels(provider="assemblyai", operation="transcription_failed").inc()
                         raise TranscriptionError(f"AssemblyAI transcription error: {data.get('error')}")
 
                     await asyncio.sleep(settings.TRANSCRIPTION_POLL_SECONDS)

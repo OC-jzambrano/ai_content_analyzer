@@ -12,6 +12,7 @@ from src.app.services.moderation_service import ModerationService
 from src.app.services.report_store import ReportStore
 from src.app.services.summarization_service import SummarizationService
 from src.app.services.transcription_service import TranscriptionService
+from src.app.services.post_store import PostResultStore
 
 
 async def startup(ctx):
@@ -24,6 +25,7 @@ async def startup(ctx):
     ctx["moderation_service"] = ModerationService()
     ctx["summarization_service"] = SummarizationService()
     ctx["aggregation_service"] = AggregationService()
+    ctx["post_store"] = PostResultStore(settings.REDIS_URL)
 
 
 class WorkerSettings:

@@ -1,162 +1,336 @@
+# src/app/workers/tasks.py
 from __future__ import annotations
 
-from collections import defaultdict
-from typing import Dict, List
+import time
+from typing import Any, Dict, List, Optional
 
-from src.app.schemas.moderation import VisualModerationResult, TextModerationResult
+from src.app.schemas.jobs import JobStatusResponse
+from src.app.schemas.moderation import TextModerationResult, VisualModerationResult
 from src.app.schemas.summarization import SummarizationResult
-from src.app.schemas.report import CampaignReport, CategoryAggregate, OverallScore
-
-SAFE = "Safe"
-WARNING = "Warning"
-UNSAFE = "Unsafe"
-
-
-VISUAL_WEIGHTS = {
-    "Adult Content": 2.0,
-    "Violence / Weapons": 2.0,
-    "Racy Content": 1.0,
-    "Medical / Gore": 1.0,
-    "Spoof / Fake Content": 1.5,
-}
-
-TEXT_WEIGHTS = {
-    "Profanity": 1.0,
-    "Hate Speech": 2.0,
-    "Misinformation": 2.0,
-    "Brand Mentions": 1.0,
-    "Disclosure Compliance": 1.0,
-    "Political Content": 1.0,
-}
+from src.app.services.aggregation_service import AggregationService
+from src.app.services.ingestion_service import IngestionService
+from src.app.services.job_store import JobStore
+from src.app.services.media_service import MediaService
+from src.app.services.moderation_service import ModerationService
+from src.app.services.post_store import PostResultStore
+from src.app.services.report_store import ReportStore
+from src.app.services.summarization_service import SummarizationService
+from src.app.services.transcription_service import TranscriptionService
+from src.app.utils.stage_logger import StageTimer
+from src.app.core.metrics import JOB_PROCESSING_TIME, JOB_FAILURES
 
 
-def _status_visual(score: float) -> str:
-    if score >= 90:
-        return SAFE
-    if score >= 70:
-        return WARNING
-    return UNSAFE
-
-
-def _status_text(score: float) -> str:
-    if score >= 85:
-        return SAFE
-    if score >= 70:
-        return WARNING
-    return UNSAFE
-
-
-class AggregationService:
-    """
-    Responsibility:
-    - Aggregate post-level moderation & summarization
-    - Compute weighted campaign-level scores
-    - Return structured CampaignReport
-    """
-
-    def aggregate(
-        self,
-        campaign_id: str,
-        visual_results: List[VisualModerationResult],
-        text_results: List[TextModerationResult],
-        summaries: List[SummarizationResult],
-        post_results: List[dict],
-    ) -> CampaignReport:
-
-        visual_scores = defaultdict(list)
-        text_scores = defaultdict(list)
-
-        # ---- Collect per-post scores ----
-        for vr in visual_results:
-            for cat in vr.categories:
-                if cat.safety_score is not None:
-                    visual_scores[cat.category].append(cat.safety_score)
-
-        for tr in text_results:
-            for cat in tr.categories:
-                if cat.safety_score is not None:
-                    text_scores[cat.category].append(cat.safety_score)
-
-        for sr in summaries:
-            for sig in sr.signals:
-                if sig.safety_score is not None:
-                    text_scores[sig.category].append(sig.safety_score)
-
-        # ---- Average per category ----
-        visual_aggregates: List[CategoryAggregate] = []
-        for cat, scores in visual_scores.items():
-            avg = sum(scores) / len(scores)
-            visual_aggregates.append(
-                CategoryAggregate(
-                    category=cat,
-                    average_safety_score=round(avg, 2),
-                    status=_status_visual(avg),
-                )
-            )
-
-        text_aggregates: List[CategoryAggregate] = []
-        for cat, scores in text_scores.items():
-            avg = sum(scores) / len(scores)
-            text_aggregates.append(
-                CategoryAggregate(
-                    category=cat,
-                    average_safety_score=round(avg, 2),
-                    status=_status_text(avg),
-                )
-            )
-
-        # ---- Weighted Overall Visual ----
-        visual_weighted_sum = 0.0
-        visual_weight_total = 0.0
-
-        for cat in visual_aggregates:
-            weight = VISUAL_WEIGHTS.get(cat.category, 1.0)
-            visual_weighted_sum += cat.average_safety_score * weight
-            visual_weight_total += weight
-
-        overall_visual_score = (
-            visual_weighted_sum / visual_weight_total if visual_weight_total else 100.0
-        )
-
-        # ---- Weighted Overall Text ----
-        text_weighted_sum = 0.0
-        text_weight_total = 0.0
-
-        for cat in text_aggregates:
-            weight = TEXT_WEIGHTS.get(cat.category, 1.0)
-            text_weighted_sum += cat.average_safety_score * weight
-            text_weight_total += weight
-
-        overall_text_score = (
-            text_weighted_sum / text_weight_total if text_weight_total else 100.0
-        )
-
-        overall_visual = OverallScore(
-            score=round(overall_visual_score, 2),
-            status=_status_visual(overall_visual_score),
-        )
-
-        overall_text = OverallScore(
-            score=round(overall_text_score, 2),
-            status=_status_text(overall_text_score),
-        )
-
-        # ---- Human Summary ----
-        summary = (
-            f"Campaign {campaign_id} analyzed across {len(visual_results)} posts. "
-            f"Overall visual safety: {overall_visual.score}% ({overall_visual.status}). "
-            f"Overall text safety: {overall_text.score}% ({overall_text.status})."
-        )
-
-        partial_failures = [p for p in post_results if not p["success"]]
-
-        return CampaignReport(
+async def _set_stage(
+    job_store: JobStore,
+    job_id: str,
+    campaign_id: str,
+    status: str,
+    stage: str,
+    error: Optional[str] = None,
+) -> None:
+    await job_store.set(
+        JobStatusResponse(
+            job_id=job_id,
             campaign_id=campaign_id,
-            visual_categories=visual_aggregates,
-            text_categories=text_aggregates,
-            overall_visual=overall_visual,
-            overall_text=overall_text,
-            summary=summary,
-            posts=post_results,
-            partial_failure_count=len(partial_failures),
+            status=status,  # queued | processing | completed | failed
+            stage=stage,
+            error=error,
         )
+    )
+
+
+async def process_campaign(ctx, job_id: str, campaign_id: str, campaign_payload: Dict[str, Any]) -> dict:
+    """
+    ARQ job entrypoint.
+
+    Args:
+        ctx: injected dependencies from worker startup()
+        job_id: generated by API
+        campaign_id: path param
+        campaign_payload: validated CampaignInput dumped to dict (contains posts, etc.)
+    """
+    # ---- START JOB TIMER ----
+    job_start = time.perf_counter()
+
+    job_store: JobStore = ctx["job_store"]
+    report_store: ReportStore = ctx["report_store"]
+    post_store: PostResultStore = ctx["post_store"]
+
+    ingestion_svc: IngestionService = ctx["ingestion_service"]
+    media_svc: MediaService = ctx["media_service"]
+    transcription_svc: TranscriptionService = ctx["transcription_service"]
+    moderation_svc: ModerationService = ctx["moderation_service"]
+    summarization_svc: SummarizationService = ctx["summarization_service"]
+    aggregation_svc: AggregationService = ctx["aggregation_service"]
+
+    await _set_stage(job_store, job_id, campaign_id, status="processing", stage="ingestion")
+
+    try:
+        posts_payload = campaign_payload.get("posts") or []
+        ingestion = await ingestion_svc.ingest(campaign_id=campaign_id, posts_payload=posts_payload)
+
+        if not ingestion.posts:
+            raise RuntimeError("No posts found in campaign payload")
+
+        visual_results: List[VisualModerationResult] = []
+        text_results: List[TextModerationResult] = []
+        summaries: List[SummarizationResult] = []
+        post_results: List[dict] = []
+
+        total = len(ingestion.posts)
+
+        for idx, post in enumerate(ingestion.posts, start=1):
+            post_id = post.post_id
+            caption = post.caption or ""
+            media_url = post.media_urls[0] if post.media_urls else None
+
+            visual_result = None
+            text_result = None
+            summary_result = None
+
+            post_partial_failure = False
+            post_errors = []
+
+            # --------------------
+            # MEDIA
+            # --------------------
+            try:
+                await _set_stage(
+                    job_store,
+                    job_id,
+                    campaign_id,
+                    status="processing",
+                    stage=f"post:{idx}/{total}:media",
+                )
+
+                timer = StageTimer(job_id, post_id, "media")
+                try:
+                    media = await media_svc.prepare_post_media(
+                        post_id=post_id,
+                        media_url=str(media_url) if media_url else None,
+                        extract_audio_enabled=True,
+                        sample_frames_enabled=True,
+                    )
+                    timer.log(success=True, retry_count=0)
+                except Exception:
+                    timer.log(success=False, retry_count=0)
+                    raise
+
+            except Exception as e:
+                # Media is fatal for post
+                post_partial_failure = True
+                post_errors.append(f"media_failed: {str(e)}")
+
+                await post_store.set(
+                    campaign_id,
+                    post_id,
+                    {
+                        "success": False,
+                        "partial_failure": True,
+                        "errors": post_errors,
+                    },
+                )
+
+                post_results.append(
+                    {
+                        "post_id": post_id,
+                        "success": False,
+                        "partial_failure": True,
+                        "error_message": str(e),
+                    }
+                )
+                continue
+
+            # --------------------
+            # VISUAL MODERATION
+            # --------------------
+            try:
+                await _set_stage(
+                    job_store,
+                    job_id,
+                    campaign_id,
+                    status="processing",
+                    stage=f"post:{idx}/{total}:visual_moderation",
+                )
+
+                timer = StageTimer(job_id, post_id, "visual_moderation")
+                try:
+                    visual_result = await moderation_svc.moderate_visual(
+                        post_id=post_id,
+                        frame_paths=[f.path for f in media.frames],
+                    )
+                    timer.log(success=True, retry_count=0)
+                    visual_results.append(visual_result)
+                except Exception:
+                    timer.log(success=False, retry_count=0)
+                    raise
+
+            except Exception as e:
+                post_partial_failure = True
+                post_errors.append(f"visual_moderation_failed: {str(e)}")
+
+            # --------------------
+            # TRANSCRIPTION
+            # --------------------
+            transcript_text = ""
+            try:
+                if media.audio_path:
+                    await _set_stage(
+                        job_store,
+                        job_id,
+                        campaign_id,
+                        status="processing",
+                        stage=f"post:{idx}/{total}:transcription",
+                    )
+
+                    timer = StageTimer(job_id, post_id, "transcription")
+                    try:
+                        t = await transcription_svc.transcribe(
+                            post_id=post_id,
+                            audio_path=media.audio_path,
+                        )
+                        transcript_text = t.transcript_text
+                        timer.log(success=True, retry_count=0)
+                    except Exception:
+                        timer.log(success=False, retry_count=0)
+                        raise
+
+            except Exception as e:
+                post_partial_failure = True
+                post_errors.append(f"transcription_failed: {str(e)}")
+
+            # --------------------
+            # TEXT MODERATION
+            # --------------------
+            try:
+                await _set_stage(
+                    job_store,
+                    job_id,
+                    campaign_id,
+                    status="processing",
+                    stage=f"post:{idx}/{total}:text_moderation",
+                )
+
+                timer = StageTimer(job_id, post_id, "text_moderation")
+                try:
+                    text_result = await moderation_svc.moderate_text(
+                        post_id=post_id,
+                        text=(caption + "\n" + transcript_text).strip(),
+                        lang="en",
+                    )
+                    timer.log(success=True, retry_count=0)
+                    text_results.append(text_result)
+                except Exception:
+                    timer.log(success=False, retry_count=0)
+                    raise
+
+            except Exception as e:
+                post_partial_failure = True
+                post_errors.append(f"text_moderation_failed: {str(e)}")
+
+            # --------------------
+            # SUMMARIZATION
+            # --------------------
+            try:
+                await _set_stage(
+                    job_store,
+                    job_id,
+                    campaign_id,
+                    status="processing",
+                    stage=f"post:{idx}/{total}:summarization",
+                )
+
+                timer = StageTimer(job_id, post_id, "summarization")
+                try:
+                    summary_result = await summarization_svc.summarize(
+                        post_id=post_id,
+                        caption=caption,
+                        transcript_text=transcript_text,
+                        visual_findings={
+                            "visual_categories": [
+                                {"category": c.category, "score": c.safety_score, "status": c.status}
+                                for c in (visual_result.categories if visual_result else [])
+                            ]
+                        },
+                    )
+                    timer.log(success=True, retry_count=0)
+                    summaries.append(summary_result)
+                except Exception:
+                    timer.log(success=False, retry_count=0)
+                    raise
+
+            except Exception as e:
+                post_partial_failure = True
+                post_errors.append(f"summarization_failed: {str(e)}")
+
+            # --------------------
+            # STORE POST RESULT
+            # --------------------
+            await post_store.set(
+                campaign_id,
+                post_id,
+                {
+                    "success": True,
+                    "partial_failure": post_partial_failure,
+                    "errors": post_errors,
+                    "visual": visual_result.model_dump() if visual_result else None,
+                    "text": text_result.model_dump() if text_result else None,
+                    "summary": summary_result.model_dump() if summary_result else None,
+                },
+            )
+
+            post_results.append(
+                {
+                    "post_id": post_id,
+                    "success": True,
+                    "partial_failure": post_partial_failure,
+                    "error_message": "; ".join(post_errors) if post_errors else None,
+                }
+            )
+
+        # ---- AGGREGATION STAGE ----
+        await _set_stage(job_store, job_id, campaign_id, status="processing", stage="aggregation")
+
+        timer = StageTimer(job_id, "campaign", "aggregation")
+        try:
+            report = aggregation_svc.aggregate(
+                campaign_id=campaign_id,
+                visual_results=visual_results,
+                text_results=text_results,
+                summaries=summaries,
+                post_results=post_results,
+            )
+            timer.log(success=True, retry_count=0)
+        except Exception:
+            timer.log(success=False, retry_count=0)
+            raise
+
+        await report_store.set(report)
+
+        await _set_stage(job_store, job_id, campaign_id, status="completed", stage="done")
+
+        # ---- RECORD JOB SUCCESS ----
+        job_duration = time.perf_counter() - job_start
+        JOB_PROCESSING_TIME.labels(campaign_id=campaign_id).observe(job_duration)
+
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "campaign_id": campaign_id,
+            "duration_seconds": job_duration,
+        }
+
+    except Exception as e:
+        # ---- RECORD JOB FAILURE ----
+        error_stage = getattr(e, "stage", "unknown")
+        JOB_FAILURES.labels(error_stage=error_stage).inc()
+
+        await _set_stage(
+            job_store,
+            job_id,
+            campaign_id,
+            status="failed",
+            stage="error",
+            error=str(e),
+        )
+        raise

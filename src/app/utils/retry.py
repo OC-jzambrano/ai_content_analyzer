@@ -12,7 +12,6 @@ class NonRetryableError(Exception):
     """Wrap exceptions that must NOT be retried."""
     pass
 
-
 async def run_with_retry(
     fn: Callable[..., Awaitable],
     *args,
@@ -22,14 +21,6 @@ async def run_with_retry(
     retryable_exceptions: Tuple[Type[BaseException], ...] = (Exception,),
     non_retryable_exceptions: Tuple[Type[BaseException], ...] = (),
 ):
-    """
-    Generic async retry wrapper.
-
-    - Exponential backoff
-    - Per-attempt timeout
-    - Distinguish retryable vs non-retryable
-    """
-
     last_error: Optional[Exception] = None
 
     for attempt in range(1, max_attempts + 1):
@@ -37,11 +28,13 @@ async def run_with_retry(
             coro = fn(*args)
 
             if timeout:
-                return await asyncio.wait_for(coro, timeout=timeout)
-            return await coro
+                result = await asyncio.wait_for(coro, timeout=timeout)
+            else:
+                result = await coro
+
+            return result, attempt - 1 
 
         except non_retryable_exceptions:
-            # immediately stop
             raise
 
         except retryable_exceptions as e:
@@ -53,7 +46,6 @@ async def run_with_retry(
             await asyncio.sleep(delay)
 
         except Exception:
-            # unknown error → do not retry
             raise
 
     raise RetryError(f"Max retry attempts reached ({max_attempts})") from last_error
