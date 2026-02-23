@@ -67,7 +67,14 @@ async def process_campaign(ctx, job_id: str, campaign_id: str, campaign_payload:
 
     try:
         posts_payload = campaign_payload.get("posts") or []
-        ingestion = await ingestion_svc.ingest(campaign_id=campaign_id, posts_payload=posts_payload)
+        ingestion_result = await ingestion_svc.ingest(campaign_id=campaign_id, posts_payload=posts_payload)
+        
+        # If ingest() returns a tuple, unpack it
+        if isinstance(ingestion_result, tuple):
+            posts, metadata = ingestion_result
+            ingestion = type('obj', (object,), {'posts': posts, 'metadata': metadata})()
+        else:
+            ingestion = ingestion_result
 
         if not ingestion.posts:
             raise RuntimeError("No posts found in campaign payload")
@@ -80,104 +87,39 @@ async def process_campaign(ctx, job_id: str, campaign_id: str, campaign_payload:
         total = len(ingestion.posts)
 
         for idx, post in enumerate(ingestion.posts, start=1):
-            post_id = post.post_id
-            caption = post.caption or ""
-            media_url = post.media_urls[0] if post.media_urls else None
-
-            # Default: assume failure until completed
-            per_post_error_stage: Optional[str] = None
-            per_post_error_message: Optional[str] = None
-
+            # Initialize variables before try block
+            post_id = None
+            per_post_error_stage = None
+            per_post_error_message = None
+            
             try:
-                # ---- MEDIA STAGE ----
-                await _set_stage(
-                    job_store,
-                    job_id,
-                    campaign_id,
-                    status="running",
-                    stage=f"post:{idx}/{total}:media",
-                )
-
+                post_id = post.get("post_id")
+                
+                # ---- MEDIA EXTRACTION STAGE ----
+                await _set_stage(job_store, job_id, campaign_id, status="running", stage="media", post_id=post_id)
+                
                 timer = StageTimer(job_id, post_id, "media")
                 try:
-                    media = await media_svc.prepare_post_media(
-                        post_id=post_id,
-                        media_url=str(media_url) if media_url else None,
-                        extract_audio_enabled=True,
-                        sample_frames_enabled=True,
-                    )
+                    # Extract video/audio and sample frames
+                    media_result = await media_svc.process_media(post_id, post)
+                    frame_paths = media_result.get("frame_paths", [])
+                    audio_path = media_result.get("audio_path")
                     timer.log(success=True, retry_count=0)
-                except Exception:
+                except Exception as e:
+                    per_post_error_stage = "media"
+                    per_post_error_message = str(e)
                     timer.log(success=False, retry_count=0)
                     raise
 
                 # ---- VISUAL MODERATION STAGE ----
-                await _set_stage(
-                    job_store,
-                    job_id,
-                    campaign_id,
-                    status="running",
-                    stage=f"post:{idx}/{total}:visual_moderation",
-                )
-
-                timer = StageTimer(job_id, post_id, "visual_moderation")
-                try:
-                    vres = await moderation_svc.moderate_visual(
-                        post_id=post_id,
-                        frame_paths=[f.path for f in media.frames],
-                    )
-                    timer.log(success=True, retry_count=0)
-                except Exception:
-                    timer.log(success=False, retry_count=0)
-                    raise
-                
-                visual_results.append(vres)
-
-                # ---- TRANSCRIPTION STAGE ----
-                transcript_text = ""
-                if media.audio_path:
-                    await _set_stage(
-                        job_store,
-                        job_id,
-                        campaign_id,
-                        status="running",
-                        stage=f"post:{idx}/{total}:transcription",
-                    )
-
-                    timer = StageTimer(job_id, post_id, "transcription")
-                    try:
-                        t = await transcription_svc.transcribe(
-                            post_id=post_id,
-                            audio_path=media.audio_path
-                        )
-                        transcript_text = t.transcript_text
-                        timer.log(success=True, retry_count=0)
-                    except Exception:
-                        timer.log(success=False, retry_count=0)
-                        raise
+                visual_result = await moderation_svc.moderate_visual(post_id, frame_paths)
 
                 # ---- TEXT MODERATION STAGE ----
-                await _set_stage(
-                    job_store,
-                    job_id,
-                    campaign_id,
-                    status="running",
-                    stage=f"post:{idx}/{total}:text_moderation",
-                )
+                combined_text = (post.get("caption") or "") + " " + (transcript_text or "")
+                text_result = await moderation_svc.moderate_text(post_id, combined_text)
 
-                timer = StageTimer(job_id, post_id, "text_moderation")
-                try:
-                    tres = await moderation_svc.moderate_text(
-                        post_id=post_id,
-                        text=(caption + "\n" + transcript_text).strip(),
-                        lang="en",
-                    )
-                    timer.log(success=True, retry_count=0)
-                except Exception:
-                    timer.log(success=False, retry_count=0)
-                    raise
-                
-                text_results.append(tres)
+                visual_results.append(visual_result)
+                text_results.append(text_result)
 
                 # ---- SUMMARIZATION STAGE ----
                 await _set_stage(
@@ -238,10 +180,7 @@ async def process_campaign(ctx, job_id: str, campaign_id: str, campaign_payload:
                 )
 
             except Exception as e:
-                per_post_error_stage = per_post_error_stage or "post_pipeline"
-                per_post_error_message = str(e)
-
-                # Store per-post blob (failure)
+                # Now these variables are always defined
                 await post_store.set(
                     campaign_id,
                     post_id,
@@ -251,15 +190,6 @@ async def process_campaign(ctx, job_id: str, campaign_id: str, campaign_payload:
                         "error_stage": per_post_error_stage,
                         "error_message": per_post_error_message,
                     },
-                )
-
-                post_results.append(
-                    {
-                        "post_id": post_id,
-                        "success": False,
-                        "error_stage": per_post_error_stage,
-                        "error_message": per_post_error_message,
-                    }
                 )
                 continue
 
