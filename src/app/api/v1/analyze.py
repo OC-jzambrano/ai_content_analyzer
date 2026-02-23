@@ -49,7 +49,7 @@ async def analyze_campaign(campaign_id: str, payload: CampaignInputSchema):
     # enqueue background job
     redis = await get_redis_pool()
     await redis.enqueue_job(
-    "app.workers.tasks.process_campaign",
+    "src.app.workers.tasks.process_campaign",
     job_id,
     campaign_id,
     payload.model_dump(),

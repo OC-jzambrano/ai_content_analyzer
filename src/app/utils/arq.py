@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from arq.connections import ArqRedis, create_pool
-from src.app.core.config import settings
+from arq.connections import RedisSettings, create_pool
+from app.core.config import settings
 
-
-async def get_redis_pool() -> ArqRedis:
-    return await create_pool(settings.REDIS_URL)
+async def get_redis_pool():
+    return await create_pool(RedisSettings.from_dsn(settings.REDIS_URL))
