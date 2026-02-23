@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     TRANSCRIPTION_POLL_SECONDS: float = 2.0
     TRANSCRIPTION_MAX_POLLS: int = 120
 
-    CLAUDE_MODEL: str = "claude-3-5-sonnet-latest"
+    CLAUDE_MODEL: str = "claude-haiku-4-5-20251001"
     CLAUDE_MAX_TOKENS: int = 800
     CLAUDE_TEMPERATURE: float = 0.2
 
