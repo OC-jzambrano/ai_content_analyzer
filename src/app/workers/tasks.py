@@ -1,13 +1,11 @@
-# src/app/workers/tasks.py
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from src.app.schemas.jobs import JobStatusResponse
 from src.app.schemas.moderation import TextModerationResult, VisualModerationResult
 from src.app.schemas.summarization import SummarizationResult
-from src.app.services.aggregation_service import AggregationService
 from src.app.services.ingestion_service import IngestionService
 from src.app.services.job_store import JobStore
 from src.app.services.media_service import MediaService
@@ -18,6 +16,9 @@ from src.app.services.summarization_service import SummarizationService
 from src.app.services.transcription_service import TranscriptionService
 from src.app.utils.stage_logger import StageTimer
 from src.app.core.metrics import JOB_PROCESSING_TIME, JOB_FAILURES
+
+if TYPE_CHECKING:
+    from src.app.services.aggregation_service import AggregationService
 
 
 async def _set_stage(
@@ -51,7 +52,6 @@ async def process_campaign(ctx, job_id: str, campaign_id: str, campaign_payload:
     """
     # ---- START JOB TIMER ----
     job_start = time.perf_counter()
-
     job_store: JobStore = ctx["job_store"]
     report_store: ReportStore = ctx["report_store"]
     post_store: PostResultStore = ctx["post_store"]

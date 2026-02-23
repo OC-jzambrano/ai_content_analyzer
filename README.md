@@ -277,15 +277,16 @@ open http://localhost:8000/docs
 ### Submit Content for Analysis
 
 ```bash
-curl -X POST http://localhost:8000/campaigns/campaign_123/analyze \
+curl -X POST http://localhost:8000/v1/campaigns/campaign_123/analyze \
   -H "Content-Type: application/json" \
   -d '{
+    "platform": "tiktok",
+    "creator_handle": "creator_1",
     "posts": [
       {
-        "id": "post_1",
-        "caption": "Amazing product launch!",
-        "media_url": "https://example.com/video.mp4",
-        "language": "en"
+        "platform_post_id": "post_1",
+        "url": "https://example.com/video.mp4",
+        "weight": 1.0
       }
     ]
   }'
@@ -346,6 +347,81 @@ curl http://localhost:8000/campaigns/campaign_123/reports
   "summary": "Campaign analyzed successfully"
 }
 ```
+## Answers to the Questions
+
+### How to reduce latency (practical changes)
+
+1. **Parallelize per-post stages**
+   * Process posts concurrently up to a configured limit (worker concurrency).
+   * Within a post: run frame extraction and audio extraction in parallel.
+
+2. **Reduce transcription wall time**
+   * Use shorter polling interval only until the job is "started", then back off (adaptive polling).
+   * Skip transcription for posts where audio is absent or negligible (detect audio track + RMS threshold).
+
+3. **Smarter frame sampling**
+   * Replace uniform sampling with "scene-change" or keyframe-based sampling:
+     * fewer frames, higher signal.
+
+4. **Batch provider calls**
+   * Where supported, submit multiple frames/text blocks in a single request to reduce round trips.
+
+5. **Cache by media hash**
+   * If the same media_url appears again, reuse results (content-addressed caching).
+
+6. **Fail fast**
+   * If media download/ffmpeg fails, stop early and mark post failed instead of burning time.
+
+### How to control AI-related costs
+
+1. **Gated pipeline**
+   * Run cheapest checks first:
+     * caption text moderation (cheap) → if hard fail, skip transcription + summarization.
+
+2. **Budget-aware execution**
+   * Per-campaign budget:
+     * cap frames analyzed
+     * cap transcription duration
+     * cap summary token length
+
+3. **Adaptive sampling**
+   * Short videos: more frames; long videos: fixed max frames.
+   * Use keyframes to reduce frames while maintaining coverage.
+
+4. **Dedup + caching**
+   * Hash media + caption + language and store results:
+     * avoids repeat charges on re-runs.
+
+5. **Provider routing**
+   * Use "good enough" model/provider by default; escalate only when:
+     * score is borderline
+     * brand requires higher confidence
+
+6. **Summarization control**
+   * Make summaries optional or "only on Review/Unsafe".
+   * Keep prompts small and enforce max output tokens.
+
+### What to improve next (highest ROI)
+
+1. **PostgreSQL persistence + analytics**
+   * Historical reporting, audits, client dashboards, cost tracking, trend detection.
+
+2. **SSRF hardening + auth**
+   * This is critical for production if media_url is user-controlled.
+
+3. **Queue health + autoscaling**
+   * Export queue depth, autoscale workers based on backlog and provider latency.
+
+4. **Better scoring transparency**
+   * Add "why" fields per category:
+     * top offending timestamps/frames
+     * excerpted transcript segments (redacted)
+
+5. **Idempotency + dedup**
+   * Avoid charging multiple times for same campaign content.
+
+6. **Tracing (OpenTelemetry)**
+   * Fast root-cause analysis when latency spikes or a provider degrades.
 
 ---
 

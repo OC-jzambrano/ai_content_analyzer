@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from arq import Worker
 from arq.connections import RedisSettings
 
 from src.app.core.config import settings
-from src.app.services.aggregation_service import AggregationService
 from src.app.services.ingestion_service import IngestionService
 from src.app.services.job_store import JobStore
 from src.app.services.media_service import MediaService
@@ -16,6 +14,9 @@ from src.app.services.post_store import PostResultStore
 
 
 async def startup(ctx):
+    # Lazy import to avoid circular import issues
+    from src.app.services.aggregation_service import AggregationService
+
     ctx["job_store"] = JobStore(settings.REDIS_URL)
     ctx["report_store"] = ReportStore(settings.REDIS_URL)
 

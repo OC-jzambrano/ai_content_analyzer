@@ -8,7 +8,6 @@ from src.app.schemas.jobs import JobStatusResponse
 
 router = APIRouter(prefix="/v1", tags=["jobs"])
 
-
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
 async def get_job(job_id: str) -> JobStatusResponse:
     store = JobStore(settings.REDIS_URL)

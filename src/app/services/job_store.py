@@ -25,7 +25,10 @@ class JobStore:
             "error": "..." | None
         }
         """
-        await self._redis.set(self._key(status["job_id"]), json.dumps(status))
+        await self._redis.set(
+        self._key(status.job_id),
+        json.dumps(status.model_dump())
+    )
 
     async def get(self, job_id: str) -> Optional[Dict[str, Any]]:
         raw = await self._redis.get(self._key(job_id))

@@ -17,6 +17,6 @@ async def health():
 def metrics():
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-app.include_router(analyze_router)
+app.include_router(analyze_router   )
 app.include_router(jobs_router)
 app.include_router(reports_router)
