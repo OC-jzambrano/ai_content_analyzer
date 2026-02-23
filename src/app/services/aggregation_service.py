@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Optional
 from src.app.schemas.jobs import JobStatusResponse
 from src.app.schemas.moderation import TextModerationResult, VisualModerationResult
 from src.app.schemas.summarization import SummarizationResult
-from src.app.services.aggregation_service import AggregationService
 from src.app.services.ingestion_service import IngestionService
 from src.app.services.job_store import JobStore
 from src.app.services.media_service import MediaService
@@ -61,7 +60,6 @@ async def process_campaign(ctx, job_id: str, campaign_id: str, campaign_payload:
     transcription_svc: TranscriptionService = ctx["transcription_service"]
     moderation_svc: ModerationService = ctx["moderation_service"]
     summarization_svc: SummarizationService = ctx["summarization_service"]
-    aggregation_svc: AggregationService = ctx["aggregation_service"]
 
     await _set_stage(job_store, job_id, campaign_id, status="processing", stage="ingestion")
 

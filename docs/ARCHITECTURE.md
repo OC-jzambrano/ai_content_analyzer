@@ -1,277 +1,225 @@
-# AI Content Analyzer
+# AI Content Analyzer — Architecture Document (Completed)
 
-AI-powered service that analyzes social media content (video + metadata) and returns a structured quality score with breakdowns across multiple dimensions.
-
----
-
-# 1. Architecture
-
-## High-Level Overview
-
-The system is composed of three main components:
-
-* **API Service (FastAPI + Hypercorn)**
-* **Worker Service (ARQ + Redis)**
-* **Redis (Task queue + result backend)**
-
-```
-Client → API → Redis Queue → Worker → Redis → API → Client
-```
-
-## Components
-
-### API
-
-* Receives analysis requests
-* Validates payload
-* Pushes async job to Redis
-* Returns Job ID
-* Allows polling for results
-
-### Worker
-
-* Consumes jobs from Redis
-* Downloads/processes media
-* Extracts frames + audio
-* Runs scoring logic
-* Stores result in Redis
-
-### Redis
-
-* Queue broker
-* Result store
-* Lightweight + fast
+AI-powered service that analyzes social media campaign content (video + metadata) and returns structured moderation + risk intelligence outputs with quality/safety scores and category breakdowns.
 
 ---
 
-# 2. Data Flow
+## 1. Scoring System Explained
 
-### Step 1 — Client Sends Request
+### Outputs Produced
 
-Client calls:
+At minimum:
 
-```
-POST /analyze
-```
+* **Per-post results**
 
-with content metadata and media URL.
+  * Visual moderation categories + scores
+  * Text moderation categories + scores (caption + transcript)
+  * Risk flags
+  * Narrative summary
+  * Post-level overall score and status
+* **Campaign report**
 
----
+  * Aggregated overall visual + text scores
+  * Category breakdown averages
+  * Status label (Safe / Review / Unsafe)
+  * Summary narrative (optional)
 
-### Step 2 — API Queues Job
+### Score Normalization
 
-API:
+Providers return different formats; internal scoring should normalize to a common scale:
 
-* Validates input
-* Pushes job to Redis
-* Returns:
+* Use a 0–100 scale where **100 = safest / best**
+* If a provider returns “probability of violation”, invert:
 
-```json
-{
-  "job_id": "b7a9c0e2-8d34-4b1a-9a2f-91aa12f9b123",
-  "status": "queued"
-}
-```
+  * `safety_score = 100 * (1 - violation_prob)`
+* If a provider returns “confidence of safe”, use directly:
 
----
+  * `safety_score = 100 * safe_confidence`
 
-### Step 3 — Worker Processes
+### Post-Level Score Calculation (Suggested)
 
-Worker:
+For each post:
 
-1. Downloads video
-2. Extracts audio (ffmpeg)
-3. Samples frames
-4. Applies scoring logic
-5. Saves structured result
+* `visual_score` = aggregate of frame-level category scores
+* `text_score` = moderation score over (caption + transcript)
 
----
+Then:
 
-### Step 4 — Client Fetches Result
+* `post_overall = wv * visual_score + wt * text_score`
 
-```
-GET /result/{job_id}
-```
+Default weights (tunable):
 
-Returns final analysis when complete.
+* `wv = 0.5`
+* `wt = 0.5`
 
----
+If there’s no audio/transcript:
 
-# 3. API Examples
+* redistribute weight to available signals (e.g., all visual + caption text)
 
-## Submit Content
+### Category Status Thresholds (Example)
 
-### Request
+Define thresholds:
 
-```
-POST /analyze
-Content-Type: application/json
-```
+* `Safe`: score >= 85
+* `Review`: 60–84
+* `Unsafe`: < 60
 
-```json
-{
-  "video_url": "https://example.com/video.mp4",
-  "caption": "This product changed my life",
-  "hashtags": ["#fitness", "#motivation"],
-  "platform": "instagram"
-}
-```
+These thresholds should be configurable (env or config file) because different brands/campaigns will want different strictness.
 
-### Response
+### Campaign-Level Aggregation (Suggested)
 
-```json
-{
-  "job_id": "b7a9c0e2-8d34-4b1a-9a2f-91aa12f9b123",
-  "status": "queued"
-}
-```
+For campaign:
 
----
+* `overall_visual` = average (or weighted average) of post visual scores
+* `overall_text` = average of post text scores
+* `overall_campaign` = weighted average of overall_visual + overall_text
 
-## Get Result
+Also compute:
 
-```
-GET /result/b7a9c0e2-8d34-4b1a-9a2f-91aa12f9b123
-```
+* category-level averages (e.g., Adult Content, Violence, Hate, Drugs)
+* top risk posts list (lowest scores)
+* counts by status (Safe/Review/Unsafe)
+
+### Why this structure works
+
+* Easy to explain to non-technical stakeholders
+* Tunable per client
+* Stable against outliers (optionally use median or trimmed mean)
+
 
 ---
 
-# 4. JSON Response Example
+## 2. Deployment & CI/CD
 
-```json
-{
-  "job_id": "b7a9c0e2-8d34-4b1a-9a2f-91aa12f9b123",
-  "status": "completed",
-  "scores": {
-    "hook_strength": 82,
-    "visual_engagement": 74,
-    "audio_quality": 68,
-    "caption_quality": 91,
-    "trend_alignment": 63
-  },
-  "overall_score": 79,
-  "verdict": "High Potential",
-  "recommendations": [
-    "Improve lighting consistency",
-    "Use stronger call-to-action in first 3 seconds",
-    "Increase pacing in middle section"
-  ],
-  "processing_time_seconds": 6.4
-}
-```
+### Docker Compose (local + simple prod)
 
----
+Services:
 
-# 5. Error Handling Strategy
+* `api`
+* `worker`
+* `redis`
+  Optional:
+* `redis-commander`
+* `prometheus`
+* `grafana`
 
-## Validation Errors (400)
+### CI (Recommended baseline)
 
-Invalid payload:
+Pipeline stages:
 
-```json
-{
-  "error": "Invalid video_url",
-  "details": "URL must be HTTPS"
-}
-```
+1. Lint: `black --check`, `flake8`, `mypy`
+2. Test: `pytest` + coverage gate
+3. Build: Docker image build
+4. Security: dependency audit (pip-audit) + image scan (Trivy)
+5. Push: registry
+6. Deploy: environment-based
+
+### Releases
+
+* Tag images with git SHA + semver
+* Promote artifacts between dev → staging → prod
 
 ---
 
-## Job Not Found (404)
+## 4. Answers to the Questions
 
-```json
-{
-  "error": "Job not found"
-}
-```
+### How to reduce latency (practical changes)
 
----
+1. **Parallelize per-post stages**
 
-## Processing Error (500)
+   * Process posts concurrently up to a configured limit (worker concurrency).
+   * Within a post: run frame extraction and audio extraction in parallel.
+2. **Reduce transcription wall time**
 
-```json
-{
-  "error": "Processing failed",
-  "details": "ffmpeg could not decode media"
-}
-```
+   * Use shorter polling interval only until the job is “started”, then back off (adaptive polling).
+   * Skip transcription for posts where audio is absent or negligible (detect audio track + RMS threshold).
+3. **Smarter frame sampling**
 
----
+   * Replace uniform sampling with “scene-change” or keyframe-based sampling:
 
-## Timeout Handling
+     * fewer frames, higher signal.
+4. **Batch provider calls**
 
-* Configurable request timeout
-* Worker retries configurable
-* Safe failure if media download fails
-* Logs contain full stack trace
+   * Where supported, submit multiple frames/text blocks in a single request to reduce round trips.
+5. **Cache by media hash**
 
----
+   * If the same media_url appears again, reuse results (content-addressed caching).
+6. **Fail fast**
 
-# 6. Scoring System Explained
+   * If media download/ffmpeg fails, stop early and mark post failed instead of burning time.
 
-The scoring engine evaluates content across multiple weighted dimensions.
+### How to control AI-related costs
 
-## Dimensions
+1. **Gated pipeline**
 
-| Category          | Weight |
-| ----------------- | ------ |
-| Hook Strength     | 25%    |
-| Visual Engagement | 20%    |
-| Audio Quality     | 15%    |
-| Caption Quality   | 20%    |
-| Trend Alignment   | 20%    |
+   * Run cheapest checks first:
 
----
+     * caption text moderation (cheap) → if hard fail, skip transcription + summarization.
+2. **Budget-aware execution**
 
-## How Overall Score Is Calculated
+   * Per-campaign budget:
 
-```
-overall_score = Σ(score_i × weight_i)
-```
+     * cap frames analyzed
+     * cap transcription duration
+     * cap summary token length
+3. **Adaptive sampling**
 
-Example:
+   * Short videos: more frames; long videos: fixed max frames.
+   * Use keyframes to reduce frames while maintaining coverage.
+4. **Dedup + caching**
 
-```
-(82 × 0.25) +
-(74 × 0.20) +
-(68 × 0.15) +
-(91 × 0.20) +
-(63 × 0.20)
-= 79
-```
+   * Hash media + caption + language and store results:
 
----
+     * avoids repeat charges on re-runs.
+5. **Provider routing**
 
-## Verdict Mapping
+   * Use “good enough” model/provider by default; escalate only when:
 
-| Score Range | Verdict            |
-| ----------- | ------------------ |
-| 85–100      | Viral Potential    |
-| 70–84       | High Potential     |
-| 50–69       | Needs Optimization |
-| <50         | Low Impact         |
+     * score is borderline
+     * brand requires higher confidence
+6. **Summarization control**
 
----
+   * Make summaries optional or “only on Review/Unsafe”.
+   * Keep prompts small and enforce max output tokens.
 
-# 7. Performance Considerations
+### What to improve next (highest ROI)
 
-* Frame sampling limits CPU usage
-* Async worker architecture prevents API blocking
-* Redis ensures horizontal scalability
-* Multiple workers can run in parallel
+1. **PostgreSQL persistence + analytics**
 
----
+   * Historical reporting, audits, client dashboards, cost tracking, trend detection.
+2. **SSRF hardening + auth**
 
-# 8. Future Improvements
+   * This is critical for production if media_url is user-controlled.
+3. **Queue health + autoscaling**
 
-* ML-based scoring model
-* Engagement prediction model
-* Platform-specific tuning
-* Batch analysis endpoint
-* Dashboard UI
+   * Export queue depth, autoscale workers based on backlog and provider latency.
+4. **Better scoring transparency**
+
+   * Add “why” fields per category:
+
+     * top offending timestamps/frames
+     * excerpted transcript segments (redacted)
+5. **Idempotency + dedup**
+
+   * Avoid charging multiple times for same campaign content.
+6. **Tracing (OpenTelemetry)**
+
+   * Fast root-cause analysis when latency spikes or a provider degrades.
 
 ---
 
-# License
+## 3. Future Improvements (Updated)
 
-Internal project.
+* PostgreSQL persistence for historical reports + billing
+* Multi-tenant support (client/org separation, per-tenant thresholds)
+* Policy engine (brand rules: forbidden topics, stricter categories)
+* Batch endpoints + webhooks (push results instead of polling)
+* Model/provider fallback routing (resilience during outages)
+* UI dashboard for campaign review and audit trail
+* Engagement prediction (separate service) once moderation is stable
+
+---
+
+## License
+
+Internal project. All rights reserved.

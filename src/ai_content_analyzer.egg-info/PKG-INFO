@@ -1,3 +1,27 @@
+Metadata-Version: 2.4
+Name: ai-content-analyzer
+Version: 0.1.0
+Summary: AI-powered multi-modal content moderation pipeline
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: fastapi>=0.110
+Requires-Dist: hypercorn>=0.16
+Requires-Dist: pydantic>=2.6
+Requires-Dist: pydantic-settings>=2.2
+Requires-Dist: httpx>=0.27
+Requires-Dist: tenacity>=8.2
+Requires-Dist: python-dotenv>=1.0
+Requires-Dist: redis>=5.0.8
+Requires-Dist: arq
+Requires-Dist: aiohttp
+Requires-Dist: prometheus-client>=0.20.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.23; extra == "dev"
+Requires-Dist: pytest-cov>=4.0; extra == "dev"
+Requires-Dist: ruff>=0.6; extra == "dev"
+Requires-Dist: mypy>=1.10; extra == "dev"
+
 # AI Content Analyzer
 
 FastAPI application with Docker, tests, and CI for automated moderation and risk intelligence platform for influencer marketing campaigns.
@@ -37,46 +61,6 @@ docker compose up --build
 # API is now available at http://localhost:8000
 # Swagger docs at http://localhost:8000/docs
 ```
-
-### Environment Variables
-
-Create `.env` file in project root:
-
-```bash
-# --- Environment ---
-ENVIRONMENT=development  # development | production
-DEBUG=True
-LOG_LEVEL=DEBUG         # DEBUG | INFO | WARNING | ERROR
-
-# --- Application ---
-APP_NAME=ai-content-analyzer
-REDIS_URL=redis://redis:6379/0
-
-# --- AI Provider Keys ---
-ASSEMBLYAI_API_KEY=your_key_here
-SIGHTENGINE_API_USER=your_user
-SIGHTENGINE_API_SECRET=your_secret
-CLAUDE_API_KEY=your_key_here
-
-# --- Processing Parameters ---
-MAX_FRAMES_PER_POST=30          # Max frames to sample per video
-FRAME_SAMPLE_FPS=0.2            # Frames per second to sample
-TRANSCRIPTION_MAX_POLLS=120     # Max polling attempts
-TRANSCRIPTION_POLL_SECONDS=5    # Seconds between polls
-
-# --- Reliability ---
-RETRY_ATTEMPTS=3                # Retry failed API calls
-REQUEST_TIMEOUT=20              # HTTP request timeout (seconds)
-
-# --- Storage ---
-MEDIA_ROOT=/mnt/media           # Path for temporary media files
-```
-
-### Configuration Priority
-
-1. Environment variables (`.env` file)
-2. `.env.example` (defaults)
-3. Hardcoded in `src/app/core/config.py`
 
 ---
 
@@ -198,7 +182,7 @@ python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
-pip install -e ".[dev]"
+pip install -r requirements.txt
 
 # Install ffmpeg (if not on Docker)
 # macOS with Homebrew
@@ -214,6 +198,48 @@ choco install ffmpeg
 ---
 
 ## ⚙️ Configuration
+
+### Environment Variables
+
+Create `.env` file in project root:
+
+```bash
+# --- Environment ---
+ENVIRONMENT=development  # development | production
+DEBUG=True
+LOG_LEVEL=DEBUG         # DEBUG | INFO | WARNING | ERROR
+
+# --- Application ---
+APP_NAME=ai-content-analyzer
+REDIS_URL=redis://redis:6379/0
+
+# --- AI Provider Keys ---
+ASSEMBLYAI_API_KEY=your_key_here
+SIGHTENGINE_API_USER=your_user
+SIGHTENGINE_API_SECRET=your_secret
+CLAUDE_API_KEY=your_key_here
+
+# --- Processing Parameters ---
+MAX_FRAMES_PER_POST=30          # Max frames to sample per video
+FRAME_SAMPLE_FPS=0.2            # Frames per second to sample
+TRANSCRIPTION_MAX_POLLS=120     # Max polling attempts
+TRANSCRIPTION_POLL_SECONDS=5    # Seconds between polls
+
+# --- Reliability ---
+RETRY_ATTEMPTS=3                # Retry failed API calls
+REQUEST_TIMEOUT=20              # HTTP request timeout (seconds)
+
+# --- Storage ---
+MEDIA_ROOT=/mnt/media           # Path for temporary media files
+```
+
+### Configuration Priority
+
+1. Environment variables (`.env` file)
+2. `.env.example` (defaults)
+3. Hardcoded in `src/app/core/config.py`
+
+---
 
 ## 🎯 Running the Application
 
