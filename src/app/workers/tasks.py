@@ -63,7 +63,7 @@ async def process_campaign(ctx, job_id: str, campaign_id: str, campaign_payload:
     summarization_svc: SummarizationService = ctx["summarization_service"]
     aggregation_svc: AggregationService = ctx["aggregation_service"]
 
-    await _set_stage(job_store, job_id, campaign_id, status="processing", stage="ingestion")
+    await _set_stage(job_store, job_id, campaign_id, status="running", stage="ingestion")
 
     try:
         posts_payload = campaign_payload.get("posts") or []
@@ -94,7 +94,7 @@ async def process_campaign(ctx, job_id: str, campaign_id: str, campaign_payload:
                     job_store,
                     job_id,
                     campaign_id,
-                    status="processing",
+                    status="running",
                     stage=f"post:{idx}/{total}:media",
                 )
 
@@ -116,7 +116,7 @@ async def process_campaign(ctx, job_id: str, campaign_id: str, campaign_payload:
                     job_store,
                     job_id,
                     campaign_id,
-                    status="processing",
+                    status="running",
                     stage=f"post:{idx}/{total}:visual_moderation",
                 )
 
@@ -140,7 +140,7 @@ async def process_campaign(ctx, job_id: str, campaign_id: str, campaign_payload:
                         job_store,
                         job_id,
                         campaign_id,
-                        status="processing",
+                        status="running",
                         stage=f"post:{idx}/{total}:transcription",
                     )
 
@@ -161,7 +161,7 @@ async def process_campaign(ctx, job_id: str, campaign_id: str, campaign_payload:
                     job_store,
                     job_id,
                     campaign_id,
-                    status="processing",
+                    status="running",
                     stage=f"post:{idx}/{total}:text_moderation",
                 )
 
@@ -184,7 +184,7 @@ async def process_campaign(ctx, job_id: str, campaign_id: str, campaign_payload:
                     job_store,
                     job_id,
                     campaign_id,
-                    status="processing",
+                    status="running",
                     stage=f"post:{idx}/{total}:summarization",
                 )
 
@@ -264,7 +264,7 @@ async def process_campaign(ctx, job_id: str, campaign_id: str, campaign_payload:
                 continue
 
         # ---- AGGREGATION STAGE ----
-        await _set_stage(job_store, job_id, campaign_id, status="processing", stage="aggregation")
+        await _set_stage(job_store, job_id, campaign_id, status="running", stage="aggregation")
 
         timer = StageTimer(job_id, "campaign", "aggregation")
         try:
@@ -282,11 +282,11 @@ async def process_campaign(ctx, job_id: str, campaign_id: str, campaign_payload:
 
         await report_store.set(report)
 
-        await _set_stage(job_store, job_id, campaign_id, status="completed", stage="done")
+        await _set_stage(job_store, job_id, campaign_id, status="done", stage="done")
 
         # ---- RECORD JOB SUCCESS ----
         job_duration = time.perf_counter() - job_start
-        JOB_PROCESSING_TIME.labels(campaign_id=campaign_id).observe(job_duration)
+        JOB_PROCESSING_TIME.labels(stage="campaign").observe(job_duration)
 
         return {"ok": True, "job_id": job_id, "campaign_id": campaign_id, "duration_seconds": job_duration}
 

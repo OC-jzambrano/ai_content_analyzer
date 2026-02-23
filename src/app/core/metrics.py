@@ -64,12 +64,20 @@ AI_FAILURES = get_or_create_counter(
 # Job Metrics
 # -----------------------------
 
-JOB_PROCESSING_TIME = get_or_create_histogram(
-    "job_processing_seconds",
-    "Total job processing time",
-)
+if "job_processing_time_seconds" not in REGISTRY._names_to_collectors:
+    JOB_PROCESSING_TIME = Histogram(
+        "job_processing_time_seconds",
+        "Time spent processing a job",
+        ["stage"],
+    )
+else:
+    JOB_PROCESSING_TIME = REGISTRY._names_to_collectors["job_processing_time_seconds"]
 
-JOB_FAILURES = get_or_create_counter(
-    "job_failures_total",
-    "Total job failures",
-)
+if "job_failures" not in REGISTRY._names_to_collectors:
+    JOB_FAILURES = Counter(
+        "job_failures",
+        "Number of failed jobs",
+        ["error_stage"],
+    )
+else:
+    JOB_FAILURES = REGISTRY._names_to_collectors["job_failures"]

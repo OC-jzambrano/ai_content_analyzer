@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from src.app.schemas.moderation import TextModerationResult, VisualModerationResult
 from src.app.schemas.summarization import SummarizationResult
-from src.app.schemas.report import CampaignReport
+from src.app.schemas.report import CampaignReport, CategoryAggregate, OverallScore, PostProcessingResult
 
 
 class AggregationService:
@@ -35,40 +35,80 @@ class AggregationService:
         """
         
         # Compute visual score aggregate
-        visual_scores = [r.overall_score for r in visual_results if r]
-        overall_visual = sum(visual_scores) / len(visual_scores) if visual_scores else 0
+        visual_scores = []
+        for r in visual_results:
+            if r and r.categories:
+                scores = [cat.safety_score for cat in r.categories if cat.safety_score is not None]
+                if scores:
+                    visual_scores.append(sum(scores) / len(scores))
+        overall_visual_score = sum(visual_scores) / len(visual_scores) if visual_scores else 0
 
         # Compute text score aggregate
-        text_scores = [r.overall_score for r in text_results if r]
-        overall_text = sum(text_scores) / len(text_scores) if text_scores else 0
-
-        # Compute campaign-level overall score
-        overall_campaign = (overall_visual + overall_text) / 2
-
-        # Determine status based on score
-        status = self._get_status(overall_campaign)
+        text_scores = []
+        for r in text_results:
+            if r and r.categories:
+                scores = [cat.safety_score for cat in r.categories if cat.safety_score is not None]
+                if scores:
+                    text_scores.append(sum(scores) / len(scores))
+        overall_text_score = sum(text_scores) / len(text_scores) if text_scores else 0
 
         # Build category averages
-        category_averages = self._compute_category_averages(visual_results, text_results)
+        visual_categories = self._compute_category_aggregates(visual_results)
+        text_categories = self._compute_category_aggregates(text_results)
 
-        # Count posts by status
-        status_counts = self._count_post_statuses(post_results)
+        # Convert post results to PostProcessingResult
+        posts = [
+            PostProcessingResult(
+                post_id=p.get("post_id", "unknown"),
+                success=p.get("success", False),
+                error_stage=p.get("error_stage"),
+                error_message=p.get("error_message"),
+            )
+            for p in post_results
+        ]
 
-        # Extract top risk posts
-        top_risk_posts = self._get_top_risk_posts(post_results, limit=5)
+        # Count partial failures
+        partial_failure_count = sum(1 for p in post_results if not p.get("success"))
 
         return CampaignReport(
             campaign_id=campaign_id,
-            overall_visual_score=overall_visual,
-            overall_text_score=overall_text,
-            overall_campaign_score=overall_campaign,
-            status=status,
-            category_averages=category_averages,
-            status_counts=status_counts,
-            top_risk_posts=top_risk_posts,
-            total_posts=len(post_results),
-            successful_posts=sum(1 for p in post_results if p.get("success")),
+            visual_categories=visual_categories,
+            text_categories=text_categories,
+            overall_visual=OverallScore(
+                score=overall_visual_score,
+                status=self._get_status(overall_visual_score),
+            ),
+            overall_text=OverallScore(
+                score=overall_text_score,
+                status=self._get_status(overall_text_score),
+            ),
+            summary=f"Campaign {campaign_id} analyzed: {len(posts)} posts, {partial_failure_count} failures",
+            posts=posts,
+            partial_failure_count=partial_failure_count,
         )
+
+    def _compute_category_aggregates(
+        self, results: List[VisualModerationResult] | List[TextModerationResult]
+    ) -> List[CategoryAggregate]:
+        """Compute average score per category."""
+        category_scores = {}
+
+        for result in results:
+            if result:
+                for cat in result.categories:
+                    if cat.category not in category_scores:
+                        category_scores[cat.category] = []
+                    if cat.safety_score is not None:
+                        category_scores[cat.category].append(cat.safety_score)
+
+        return [
+            CategoryAggregate(
+                category=cat,
+                average_safety_score=sum(scores) / len(scores) if scores else 0,
+                status=self._get_status(sum(scores) / len(scores) if scores else 0),
+            )
+            for cat, scores in category_scores.items()
+        ]
 
     def _get_status(self, score: float) -> str:
         """Determine status label from score."""
@@ -78,58 +118,3 @@ class AggregationService:
             return "review"
         else:
             return "unsafe"
-
-    def _compute_category_averages(
-        self,
-        visual_results: List[VisualModerationResult],
-        text_results: List[TextModerationResult],
-    ) -> dict:
-        """Compute average score per category across all posts."""
-        category_scores = {}
-
-        # Aggregate visual categories
-        for vresult in visual_results:
-            if vresult:
-                for cat in vresult.categories:
-                    if cat.category not in category_scores:
-                        category_scores[cat.category] = []
-                    category_scores[cat.category].append(cat.safety_score)
-
-        # Aggregate text categories
-        for tresult in text_results:
-            if tresult:
-                for cat in tresult.categories:
-                    if cat.category not in category_scores:
-                        category_scores[cat.category] = []
-                    category_scores[cat.category].append(cat.safety_score)
-
-        # Compute averages
-        return {
-            cat: sum(scores) / len(scores)
-            for cat, scores in category_scores.items()
-        }
-
-    def _count_post_statuses(self, post_results: List[dict]) -> dict:
-        """Count posts by success status."""
-        safe_count = 0
-        review_count = 0
-        unsafe_count = 0
-
-        for post in post_results:
-            if not post.get("success"):
-                continue
-            # You may want to infer status from error_message or stored scores
-            # For now, default to "safe" if no explicit status is stored
-            safe_count += 1
-
-        return {
-            "safe": safe_count,
-            "review": review_count,
-            "unsafe": unsafe_count,
-        }
-
-    def _get_top_risk_posts(self, post_results: List[dict], limit: int = 5) -> List[dict]:
-        """Extract posts with lowest scores (highest risk)."""
-        # Sort by success descending, then filter or rank by error presence
-        at_risk = [p for p in post_results if not p.get("success") or p.get("partial_failure")]
-        return at_risk[:limit]
