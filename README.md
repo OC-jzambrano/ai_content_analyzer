@@ -304,7 +304,7 @@ curl -X POST http://localhost:8000/v1/campaigns/campaign_123/analyze \
 ### Poll Job Status
 
 ```bash
-curl http://localhost:8000/v1/campaigns/campaign_123/jobs/b7a9c0e2-8d34-4b1a-9a2f-91aa12f9b123
+curl http://localhost:8000/v1/jobs/<job_id>
 ```
 
 **Response:**
@@ -321,7 +321,7 @@ curl http://localhost:8000/v1/campaigns/campaign_123/jobs/b7a9c0e2-8d34-4b1a-9a2
 ### Fetch Campaign Report
 
 ```bash
-curl http://localhost:8000/v1/campaigns/campaign_123/reports
+curl http://localhost:8000/v1/campaigns/campaign_123/report
 ```
 
 **Response:**
