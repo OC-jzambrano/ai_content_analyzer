@@ -18,9 +18,11 @@ dependencies = [
     "tenacity>=8.2",
     "python-dotenv>=1.0",
     "redis>=5.0.8",
+    "prometheus-client>=0.20.0",
     "arq",
     "aiohttp",
-    "prometheus-client>=0.20.0"
+    "yt-dlp"
+   
 ]
 
 [project.optional-dependencies]

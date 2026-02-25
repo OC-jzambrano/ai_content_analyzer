@@ -36,13 +36,20 @@ class AssemblyAIClient:
                     if resp.status >= 400:
                         raise TranscriptionError(f"AssemblyAI upload failed ({resp.status}): {text[:500]}")
                     data = await resp.json()
-                    return data["upload_url"]
+                    upload_url = data.get("upload_url")
+                    if not isinstance(upload_url, str) or not upload_url:
+                        raise TranscriptionError(f"AssemblyAI upload missing upload_url: {data}")
+                    return upload_url
 
     async def create_transcript(self, upload_url: str) -> str:
+        if not isinstance(upload_url, str) or not upload_url:
+            raise TranscriptionError(f"Invalid upload_url: {upload_url!r}")
+
         payload = {
             "audio_url": upload_url,
             "punctuate": True,
             "format_text": True,
+            "speech_models": ["universal-2"],
         }
         timeout = aiohttp.ClientTimeout(total=settings.REQUEST_TIMEOUT)
         async with aiohttp.ClientSession(timeout=timeout, headers=self._headers) as session:

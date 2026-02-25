@@ -87,23 +87,33 @@ async def process_campaign(ctx, job_id: str, campaign_id: str, campaign_payload:
         total = len(ingestion.posts)
 
         for idx, post in enumerate(ingestion.posts, start=1):
-            # Initialize variables before try block
             post_id = None
             per_post_error_stage = None
             per_post_error_message = None
-            
+
             try:
-                post_id = post.get("post_id")
-                
+                # IngestedPost is a model, not dict
+                post_id = post.post_id
+                caption = post.caption or ""
+
                 # ---- MEDIA EXTRACTION STAGE ----
-                await _set_stage(job_store, job_id, campaign_id, status="running", stage="media", post_id=post_id)
-                
+                await _set_stage(job_store, job_id, campaign_id, status="running", stage="media")
+
                 timer = StageTimer(job_id, post_id, "media")
                 try:
-                    # Extract video/audio and sample frames
-                    media_result = await media_svc.process_media(post_id, post)
-                    frame_paths = media_result.get("frame_paths", [])
-                    audio_path = media_result.get("audio_path")
+                    media_url = post.media_urls[0] if post.media_urls else post.url
+                    media_result = await media_svc.prepare_post_media(
+                        post_id=post_id,
+                        media_url=media_url,
+                        extract_audio_enabled=True,
+                        sample_frames_enabled=True,
+                    )
+
+                    frame_paths = [
+                        f.path if hasattr(f, "path") else str(f)
+                        for f in (media_result.frames or [])
+                    ]
+                    audio_path = media_result.audio_path
                     timer.log(success=True, retry_count=0)
                 except Exception as e:
                     per_post_error_stage = "media"
@@ -111,17 +121,52 @@ async def process_campaign(ctx, job_id: str, campaign_id: str, campaign_payload:
                     timer.log(success=False, retry_count=0)
                     raise
 
-                # ---- VISUAL MODERATION STAGE ----
-                visual_result = await moderation_svc.moderate_visual(post_id, frame_paths)
+                # ---- TRANSCRIPTION ----
+                try:
+                    await _set_stage(job_store, job_id, campaign_id, status="running", stage=f"post:{idx}/{total}:transcription")
+                    timer = StageTimer(job_id, post_id, "transcription")
 
-                # ---- TEXT MODERATION STAGE ----
-                combined_text = (post.get("caption") or "") + " " + (transcript_text or "")
-                text_result = await moderation_svc.moderate_text(post_id, combined_text)
+                    transcript_text = ""
+                    if audio_path:
+                        transcript_text = await transcription_svc.transcribe(post_id, audio_path)
 
-                visual_results.append(visual_result)
-                text_results.append(text_result)
+                    timer.log(success=True, retry_count=0)
+                except Exception as e:
+                    per_post_error_stage = "transcription"
+                    per_post_error_message = str(e)
+                    timer.log(success=False, retry_count=0)
+                    raise
 
-                # ---- SUMMARIZATION STAGE ----
+                # ---- VISUAL MODERATION ----
+                try:
+                    await _set_stage(job_store, job_id, campaign_id, status="running", stage=f"post:{idx}/{total}:visual_moderation")
+                    timer = StageTimer(job_id, post_id, "visual_moderation")
+
+                    visual_result = await moderation_svc.moderate_visual(post_id, frame_paths)
+
+                    timer.log(success=True, retry_count=0)
+                except Exception as e:
+                    per_post_error_stage = "visual_moderation"
+                    per_post_error_message = str(e)
+                    timer.log(success=False, retry_count=0)
+                    raise
+
+                # ---- TEXT MODERATION ----
+                try:
+                    await _set_stage(job_store, job_id, campaign_id, status="running", stage=f"post:{idx}/{total}:text_moderation")
+                    timer = StageTimer(job_id, post_id, "text_moderation")
+
+                    combined_text = (caption or "") + " " + (transcript_text or "")
+                    text_result = await moderation_svc.moderate_text(post_id, combined_text)
+
+                    timer.log(success=True, retry_count=0)
+                except Exception as e:
+                    per_post_error_stage = "text_moderation"
+                    per_post_error_message = str(e)
+                    timer.log(success=False, retry_count=0)
+                    raise
+
+                # ---- SUMMARIZATION ----
                 await _set_stage(
                     job_store,
                     job_id,
@@ -139,19 +184,22 @@ async def process_campaign(ctx, job_id: str, campaign_id: str, campaign_payload:
                         visual_findings={
                             "visual_categories": [
                                 {"category": c.category, "score": c.safety_score, "status": c.status}
-                                for c in vres.categories
+                                for c in visual_result.categories
                             ],
-                            "visual_partial_failures": vres.partial_failures,
+                            "visual_partial_failures": visual_result.partial_failures,
                         },
                     )
                     timer.log(success=True, retry_count=0)
-                except Exception:
+                except Exception as e:
+                    per_post_error_stage = "summarization"
+                    per_post_error_message = str(e)
                     timer.log(success=False, retry_count=0)
                     raise
-                
+
+                visual_results.append(visual_result)
+                text_results.append(text_result)
                 summaries.append(sres)
 
-                # Store per-post blob (success)
                 await post_store.set(
                     campaign_id,
                     post_id,
@@ -160,12 +208,12 @@ async def process_campaign(ctx, job_id: str, campaign_id: str, campaign_payload:
                         "post_id": post_id,
                         "caption": caption,
                         "media": {
-                            "video_path": media.video_path,
-                            "audio_path": media.audio_path,
-                            "frames": [f.model_dump() for f in media.frames],
+                            "video_path": media_result.video_path,
+                            "audio_path": media_result.audio_path,
+                            "frames": [f.model_dump() for f in media_result.frames],
                         },
-                        "visual": vres.model_dump(),
-                        "text": tres.model_dump(),
+                        "visual": visual_result.model_dump(),
+                        "text": text_result.model_dump(),
                         "summary": sres.model_dump(),
                     },
                 )
@@ -180,7 +228,10 @@ async def process_campaign(ctx, job_id: str, campaign_id: str, campaign_payload:
                 )
 
             except Exception as e:
-                # Now these variables are always defined
+                if per_post_error_stage is None:
+                    per_post_error_stage = "unknown"
+                if per_post_error_message is None:
+                    per_post_error_message = str(e)
                 await post_store.set(
                     campaign_id,
                     post_id,
@@ -190,6 +241,14 @@ async def process_campaign(ctx, job_id: str, campaign_id: str, campaign_payload:
                         "error_stage": per_post_error_stage,
                         "error_message": per_post_error_message,
                     },
+                )
+                post_results.append(
+                    {
+                        "post_id": post_id,
+                        "success": False,
+                        "error_stage": per_post_error_stage,
+                        "error_message": per_post_error_message,
+                    }
                 )
                 continue
 
